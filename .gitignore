@@ -1,0 +1,25 @@
+# Terraform
+**/.terraform/*
+*.tfstate
+*.tfstate.*
+*.tfvars
+crash.log
+
+# Python
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+
+# OS/editor noise
+.DS_Store
+.vscode/
+.idea/
+
+# Creds
+.env
+
+# Large data files
+sample_data/raw/raw_scan_events.jsonl
+sample_data/output/final_shipments.csv
+sample_data/raw/shipment_master.csv
+sample_data/raw/billing_extract.csv
