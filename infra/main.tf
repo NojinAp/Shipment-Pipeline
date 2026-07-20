@@ -79,6 +79,25 @@ resource "aws_kinesis_stream" "scan_events" {
   retention_period = 24
 }
 
+resource "aws_kinesis_firehose_delivery_stream" "scan_events" {
+  name        = "shipment-pipeline-scan-events-stream"
+  destination = "extended_s3"
+
+  kinesis_source_configuration {
+    kinesis_stream_arn = aws_kinesis_stream.scan_events.arn
+    role_arn            = aws_iam_role.firehose_role.arn
+  }
+
+  extended_s3_configuration {
+    role_arn   = aws_iam_role.firehose_role.arn
+    bucket_arn = aws_s3_bucket.shipment_pipeline.arn
+    prefix     = "extract/raw/scan_events/"
+
+    buffering_size     = 1
+    buffering_interval = 60
+  }
+}
+
 resource "aws_s3_object" "shipment_master_staging" {
   bucket = aws_s3_bucket.shipment_pipeline.id
   key    = "redshift/staging/shipment_master.csv"

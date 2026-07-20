@@ -10,6 +10,7 @@ import sys
 from awsglue.transforms import *
 from awsglue.utils import getResolvedOptions
 from pyspark.context import SparkContext
+from pyspark.sql.types import StructType, StructField, StringType, IntegerType
 from awsglue.context import GlueContext
 from awsglue.job import Job
 
@@ -31,14 +32,24 @@ billing_df = spark.read.csv(
     header=True,
     inferSchema=True,
 )
-scan_events_df = spark.read.json(
-    "s3://{}/extract/raw/raw_scan_events.jsonl".format(args["BUCKET_NAME"])
+scan_event_schema = StructType([
+    StructField("event_id", StringType(), True),
+    StructField("shipment_id", StringType(), True),
+    StructField("event_type", StringType(), True),
+    StructField("event_timestamp", StringType(), True),
+    StructField("carrier_hub", StringType(), True),
+    StructField("ingestion_date", StringType(), True),
+    StructField("attempt_number", IntegerType(), True),
+    StructField("attempt_result", StringType(), True),
+])
+scan_event_df = spark.read.option("recursiveFileLookup", "true").schema(scan_event_schema).json(
+    's3://{}/extract/raw/scan_events/'.format(args["BUCKET_NAME"])
 )
 
 shipment_df.write.mode("overwrite").parquet(
     "s3://{}/extract/preprocessed/shipment_master/".format(args["BUCKET_NAME"])
 )
-scan_events_df.write.mode("overwrite").parquet(
+scan_event_df.write.mode("overwrite").parquet(
     "s3://{}/extract/preprocessed/scan_events/".format(args["BUCKET_NAME"])
 )
 billing_df.write.mode("overwrite").parquet(
