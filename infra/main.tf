@@ -98,16 +98,96 @@ resource "aws_kinesis_firehose_delivery_stream" "scan_events" {
   }
 }
 
-resource "aws_s3_object" "shipment_master_staging" {
+variable "rds_password" {
+  type      = string
+  sensitive = true
+}
+
+variable "my_ip" {
+  type    = string
+  default = "136.226.130.83/32"
+}
+
+resource "aws_security_group" "rds_sg" {
+  name   = "shipment-pipeline-rds-sg"
+  vpc_id = "vpc-0a9f2dbb902bda42c"
+
+  ingress {
+    from_port   = 5432
+    to_port     = 5432
+    protocol    = "tcp"
+    cidr_blocks = [var.my_ip]
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+}
+
+resource "aws_db_subnet_group" "rds_subnet_group" {
+  name       = "shipment-pipeline-rds-subnet-group"
+  subnet_ids = ["subnet-073d19ab068f98059", "subnet-0d2ff734fcec39eba", "subnet-00caf19b0fe5f3299"]
+}
+
+resource "aws_db_instance" "shipment_source" {
+  identifier             = "shipment-pipeline-source-db"
+  engine                 = "postgres"
+  instance_class         = "db.t3.micro"
+  allocated_storage      = 20
+  db_name                = "shipment_source"
+  username               = "postgres"
+  password               = var.rds_password
+  vpc_security_group_ids = [aws_security_group.rds_sg.id]
+  db_subnet_group_name   = aws_db_subnet_group.rds_subnet_group.name
+  publicly_accessible    = true
+  skip_final_snapshot    = true
+}
+
+output "rds_endpoint" {
+  value = aws_db_instance.shipment_source.address
+}
+
+resource "aws_iam_role" "rds_s3_import_role" {
+  name = "shipment-pipeline-rds-s3-import-role"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Action = "sts:AssumeRole"
+        Effect = "Allow"
+        Principal = {
+          Service = "rds.amazonaws.com"
+        }
+      }
+    ]
+  })
+}
+
+resource "aws_iam_role_policy_attachment" "rds_s3_read" {
+  role       = aws_iam_role.rds_s3_import_role.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess"
+}
+
+resource "aws_db_instance_role_association" "rds_s3_import" {
+  db_instance_identifier = aws_db_instance.shipment_source.identifier
+  feature_name           = "s3Import"
+  role_arn               = aws_iam_role.rds_s3_import_role.arn
+}
+
+resource "aws_s3_object" "rds_shipment_master_staging" {
   bucket = aws_s3_bucket.shipment_pipeline.id
-  key    = "redshift/staging/shipment_master.csv"
+  key    = "rds/staging/shipment_master.csv"
   source = "../sample_data/raw/shipment_master.csv"
   etag   = filemd5("../sample_data/raw/shipment_master.csv")
 }
 
-resource "aws_s3_object" "billing_extract_staging" {
+resource "aws_s3_object" "rds_billing_extract_staging" {
   bucket = aws_s3_bucket.shipment_pipeline.id
-  key    = "redshift/staging/billing_extract.csv"
+  key    = "rds/staging/billing_extract.csv"
   source = "../sample_data/raw/billing_extract.csv"
   etag   = filemd5("../sample_data/raw/billing_extract.csv")
 }
@@ -188,4 +268,141 @@ resource "aws_glue_job" "load" {
   glue_version      = "4.0"
   number_of_workers = 2
   worker_type       = "G.1X"
+}
+
+resource "aws_iam_role" "step_functions_role" {
+  name = "shipment-pipeline-step-functions-role"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Action = "sts:AssumeRole"
+        Effect = "Allow"
+        Principal = {
+          Service = "states.amazonaws.com"
+        }
+      }
+    ]
+  })
+}
+
+resource "aws_iam_role_policy_attachment" "step_functions_glue_access" {
+  role       = aws_iam_role.step_functions_role.name
+  policy_arn = "arn:aws:iam::aws:policy/AWSGlueConsoleFullAccess"
+}
+
+resource "aws_sfn_state_machine" "pipeline" {
+  name     = "shipment-pipeline-orchestration"
+  role_arn = aws_iam_role.step_functions_role.arn
+
+  definition = jsonencode({
+    Comment = "Extract -> Transform -> Load, sequential, stop on failure"
+    StartAt = "Extract"
+    States = {
+      Extract = {
+        Type     = "Task"
+        Resource = "arn:aws:states:::glue:startJobRun.sync"
+        Parameters = {
+          JobName = aws_glue_job.extract.name
+        }
+        Next = "Transform"
+      }
+      Transform = {
+        Type     = "Task"
+        Resource = "arn:aws:states:::glue:startJobRun.sync"
+        Parameters = {
+          JobName = aws_glue_job.transform.name
+        }
+        Next = "Load"
+      }
+      Load = {
+        Type     = "Task"
+        Resource = "arn:aws:states:::glue:startJobRun.sync"
+        Parameters = {
+          JobName = aws_glue_job.load.name
+        }
+        End = true
+      }
+    }
+  })
+}
+
+resource "aws_iam_role" "lambda_produce_shipments_role" {
+  name = "shipment-pipeline-lambda-produce-shipments-role"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Action = "sts:AssumeRole"
+        Effect = "Allow"
+        Principal = {
+          Service = "lambda.amazonaws.com"
+        }
+      }
+    ]
+  })
+}
+
+resource "aws_iam_role_policy_attachment" "lambda_basic_execution" {
+  role       = aws_iam_role.lambda_produce_shipments_role.name
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+}
+
+resource "aws_iam_role_policy_attachment" "lambda_vpc_access" {
+  role       = aws_iam_role.lambda_produce_shipments_role.name
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole"
+}
+
+resource "aws_security_group_rule" "rds_self_access" {
+  type                     = "ingress"
+  from_port                = 5432
+  to_port                  = 5432
+  protocol                 = "tcp"
+  security_group_id        = aws_security_group.rds_sg.id
+  source_security_group_id = aws_security_group.rds_sg.id
+}
+
+resource "aws_lambda_function" "produce_shipments" {
+  function_name = "shipment-pipeline-produce-shipments"
+  role          = aws_iam_role.lambda_produce_shipments_role.arn
+  handler       = "lambda_produce_shipments.lambda_handler"
+  runtime       = "python3.12"
+  filename      = "../lambda_produce_shipments.zip"
+  source_code_hash = filebase64sha256("../lambda_produce_shipments.zip")
+  timeout       = 30
+
+  vpc_config {
+    subnet_ids         = ["subnet-073d19ab068f98059", "subnet-0d2ff734fcec39eba", "subnet-00caf19b0fe5f3299"]
+    security_group_ids = [aws_security_group.rds_sg.id]
+  }
+
+  environment {
+    variables = {
+      RDS_HOST     = aws_db_instance.shipment_source.address
+      RDS_PORT     = "5432"
+      RDS_DB       = "shipment_source"
+      RDS_USER     = "postgres"
+      RDS_PASSWORD = var.rds_password
+    }
+  }
+}
+
+resource "aws_cloudwatch_event_rule" "produce_shipments_schedule" {
+  name                = "shipment-pipeline-produce-shipments-schedule"
+  schedule_expression = "rate(1 hour)"
+}
+
+resource "aws_cloudwatch_event_target" "produce_shipments_target" {
+  rule = aws_cloudwatch_event_rule.produce_shipments_schedule.name
+  arn  = aws_lambda_function.produce_shipments.arn
+}
+
+resource "aws_lambda_permission" "allow_eventbridge" {
+  statement_id  = "AllowEventBridgeInvoke"
+  action        = "lambda:InvokeFunction"
+  function_name = aws_lambda_function.produce_shipments.function_name
+  principal     = "events.amazonaws.com"
+  source_arn    = aws_cloudwatch_event_rule.produce_shipments_schedule.arn
 }

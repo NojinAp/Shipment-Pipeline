@@ -11,6 +11,7 @@ from awsglue.transforms import *
 from awsglue.utils import getResolvedOptions
 from pyspark.context import SparkContext
 from pyspark.sql.types import StructType, StructField, StringType, IntegerType
+from pyspark.sql.functions import when, col
 from awsglue.context import GlueContext
 from awsglue.job import Job
 
@@ -26,6 +27,10 @@ shipment_df = spark.read.csv(
     "s3://{}/extract/raw/shipment_master/".format(args["BUCKET_NAME"]),
     header=True,
     inferSchema=True,
+)
+shipment_df = shipment_df.withColumn(
+    "is_guaranteed",
+    when(col("is_guaranteed") == "t", True).otherwise(False)
 )
 billing_df = spark.read.csv(
     "s3://{}/extract/raw/billing_extract/".format(args["BUCKET_NAME"]),

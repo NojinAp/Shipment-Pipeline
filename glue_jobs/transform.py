@@ -15,7 +15,8 @@ from pyspark.context import SparkContext
 from awsglue.context import GlueContext
 from awsglue.job import Job
 from pyspark.sql import Window
-from pyspark.sql.functions import count, col, to_date, lit, row_number, when
+from pyspark.sql.functions import col, to_date, lit, row_number, when
+from transform_logic import find_duplicates, find_orphans
 
 args = getResolvedOptions(sys.argv, ["JOB_NAME", "BUCKET_NAME"])
 
@@ -36,32 +37,17 @@ billing_df = spark.read.parquet(
 )
 
 # duplicate billing records
-dup_window_1 = Window.partitionBy("shipment_id")
-duplicate_billing_df = (
-    billing_df.withColumn("shipment_id_count", count("shipment_id").over(dup_window_1))
-    .filter(col("shipment_id_count") > 1)
-    .drop("shipment_id_count")
-)
+duplicate_billing_df = find_duplicates(billing_df, "shipment_id")
 # orphaned billing records
-orphaned_billing_df = billing_df.join(shipment_df, on="shipment_id", how="left_anti")
+orphaned_billing_df = find_orphans(billing_df, shipment_df, 'shipment_id')
 
 # duplicate events
-dup_window_2 = Window.partitionBy("event_id")
-duplicate_event_df = (
-    scan_event_df.withColumn("event_id_count", count("event_id").over(dup_window_2))
-    .filter(col("event_id_count") > 1)
-    .drop("event_id_count")
-)
+duplicate_event_df = find_duplicates(scan_event_df, "event_id")
 # orphaned events
-orphaned_event_df = scan_event_df.join(shipment_df, on="shipment_id", how="left_anti")
+orphaned_event_df = find_orphans(scan_event_df, shipment_df, 'shipment_id')
 
 # duplicate shipments
-dup_window_3 = Window.partitionBy("shipment_id")
-duplicate_shipment_df = (
-    shipment_df.withColumn("shipment_id_count", count("shipment_id").over(dup_window_3))
-    .filter(col("shipment_id_count") > 1)
-    .drop("shipment_id_count")
-)
+duplicate_shipment_df = find_duplicates(shipment_df, "shipment_id")
 # bad-date shipments
 bad_date_shipment_df = shipment_df.filter(
     col("promised_delivery_date") < to_date(col("booking_timestamp"))

@@ -23,3 +23,10 @@ sample_data/raw/raw_scan_events.jsonl
 sample_data/output/final_shipments.csv
 sample_data/raw/shipment_master.csv
 sample_data/raw/billing_extract.csv
+
+# Virtual environment
+.venv-spark/
+
+# Build artifacts
+lambda_package/
+lambda_produce_shipments.zip

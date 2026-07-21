@@ -12,7 +12,7 @@ conn = redshift_connector.connect(
     password=os.environ["REDSHIFT_PASSWORD"],
 )
 
-with open("redshift/schema.sql") as f:
+with open("redshift/redshift_schema.sql") as f:
     sql = f.read()
 
 statements = [s.strip() for s in sql.split(";") if s.strip()]
