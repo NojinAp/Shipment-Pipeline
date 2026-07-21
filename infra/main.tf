@@ -458,3 +458,22 @@ resource "aws_sns_topic_policy" "allow_eventbridge" {
     }]
   })
 }
+
+resource "aws_cloudwatch_metric_alarm" "stepfunction_failures" {
+  alarm_name          = "shipment-pipeline-stepfunction-failures"
+  comparison_operator = "GreaterThanOrEqualToThreshold"
+  evaluation_periods   = 1
+  metric_name          = "ExecutionsFailed"
+  namespace             = "AWS/States"
+  period                = 300
+  statistic             = "Sum"
+  threshold             = 1
+  treat_missing_data   = "notBreaching"
+  alarm_description    = "Fires when the shipment pipeline state machine has a failed execution"
+
+  dimensions = {
+    StateMachineArn = aws_sfn_state_machine.pipeline.arn
+  }
+
+  alarm_actions = [aws_sns_topic.pipeline_alerts.arn]
+}
