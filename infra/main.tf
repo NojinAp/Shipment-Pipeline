@@ -406,3 +406,55 @@ resource "aws_lambda_permission" "allow_eventbridge" {
   principal     = "events.amazonaws.com"
   source_arn    = aws_cloudwatch_event_rule.produce_shipments_schedule.arn
 }
+
+resource "aws_sns_topic" "pipeline_alerts" {
+  name = "shipment-pipeline-alerts"
+}
+
+resource "aws_sns_topic_subscription" "pipeline_alerts_email" {
+  topic_arn = aws_sns_topic.pipeline_alerts.arn
+  protocol  = "email"
+  endpoint  = var.alert_email 
+}
+
+resource "aws_cloudwatch_event_rule" "glue_job_failures" {
+  name        = "shipment-pipeline-glue-failures"
+  description = "Triggers on FAILED/TIMEOUT/STOPPED state for the pipeline's Glue jobs"
+
+  event_pattern = jsonencode({
+    source      = ["aws.glue"]
+    detail-type = ["Glue Job State Change"]
+    detail = {
+      jobName = [
+        "extract",  
+        "transform",
+        "load"
+      ]
+      state = ["FAILED", "TIMEOUT", "STOPPED"]
+    }
+  })
+}
+
+resource "aws_cloudwatch_event_target" "glue_failures_to_sns" {
+  rule      = aws_cloudwatch_event_rule.glue_job_failures.name
+  target_id = "sns-alert"
+  arn       = aws_sns_topic.pipeline_alerts.arn
+}
+
+resource "aws_sns_topic_policy" "allow_eventbridge" {
+  arn = aws_sns_topic.pipeline_alerts.arn
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Sid       = "AllowEventBridgePublish"
+      Effect    = "Allow"
+      Principal = { Service = "events.amazonaws.com" }
+      Action    = "sns:Publish"
+      Resource  = aws_sns_topic.pipeline_alerts.arn
+      Condition = {
+        ArnEquals = { "aws:SourceArn" = aws_cloudwatch_event_rule.glue_job_failures.arn }
+      }
+    }]
+  })
+}
