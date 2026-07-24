@@ -9,6 +9,10 @@ terraform {
       source  = "hashicorp/aws"
       version = "~> 6.0"
     }
+    archive = {
+      source  = "hashicorp/archive"
+      version = "~> 2.0"
+    }
   }
 }
 
@@ -174,20 +178,6 @@ resource "aws_db_instance_role_association" "rds_s3_import" {
   db_instance_identifier = aws_db_instance.shipment_source.identifier
   feature_name           = "s3Import"
   role_arn               = aws_iam_role.rds_s3_import_role.arn
-}
-
-resource "aws_s3_object" "rds_shipment_master_staging" {
-  bucket = aws_s3_bucket.shipment_pipeline.id
-  key    = "rds/staging/shipment_master.csv"
-  source = "../sample_data/raw/shipment_master.csv"
-  etag   = filemd5("../sample_data/raw/shipment_master.csv")
-}
-
-resource "aws_s3_object" "rds_billing_extract_staging" {
-  bucket = aws_s3_bucket.shipment_pipeline.id
-  key    = "rds/staging/billing_extract.csv"
-  source = "../sample_data/raw/billing_extract.csv"
-  etag   = filemd5("../sample_data/raw/billing_extract.csv")
 }
 
 resource "aws_s3_object" "extract_script" {
@@ -387,13 +377,19 @@ resource "aws_security_group_rule" "rds_my_ip_access" {
   cidr_blocks       = [var.my_ip]
 }
 
+data "archive_file" "lambda_produce_shipments" {
+  type        = "zip"
+  source_file = "../lambda_produce_shipments.py"
+  output_path = "${path.module}/lambda_produce_shipments.zip"
+}
+
 resource "aws_lambda_function" "produce_shipments" {
   function_name = "shipment-pipeline-produce-shipments"
   role          = aws_iam_role.lambda_produce_shipments_role.arn
   handler       = "lambda_produce_shipments.lambda_handler"
   runtime       = "python3.12"
-  filename      = "../lambda_produce_shipments.zip"
-  source_code_hash = filebase64sha256("../lambda_produce_shipments.zip")
+  filename         = data.archive_file.lambda_produce_shipments.output_path
+  source_code_hash = data.archive_file.lambda_produce_shipments.output_base64sha256
   timeout       = 30
 
   vpc_config {
