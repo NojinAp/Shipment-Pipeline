@@ -496,3 +496,17 @@ resource "aws_cloudwatch_metric_alarm" "stepfunction_failures" {
 
   alarm_actions = [aws_sns_topic.pipeline_alerts.arn]
 }
+
+resource "aws_glue_catalog_database" "shipment_pipeline_db" {
+  name = "shipment_pipeline_db"
+}
+
+resource "aws_glue_crawler" "load_crawler" {
+  name          = "shipment-pipeline-load-crawler"
+  role          = aws_iam_role.glue_role.arn
+  database_name = aws_glue_catalog_database.shipment_pipeline_db.name
+
+  s3_target {
+    path = "s3://${aws_s3_bucket.shipment_pipeline.id}/load/"
+  }
+}
