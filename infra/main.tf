@@ -112,13 +112,6 @@ resource "aws_security_group" "rds_sg" {
   name   = "shipment-pipeline-rds-sg"
   vpc_id = "vpc-0a9f2dbb902bda42c"
 
-  ingress {
-    from_port   = 5432
-    to_port     = 5432
-    protocol    = "tcp"
-    cidr_blocks = [var.my_ip]
-  }
-
   egress {
     from_port   = 0
     to_port     = 0
@@ -213,6 +206,20 @@ resource "aws_s3_object" "load_script" {
   etag   = filemd5("../glue_jobs/load.py") 
 }
 
+resource "aws_s3_object" "transform_logic_script" {
+  bucket = aws_s3_bucket.shipment_pipeline.id
+  key    = "scripts/transform_logic.py"
+  source = "../glue_jobs/transform_logic.py"
+  etag   = filemd5("../glue_jobs/transform_logic.py")
+}
+
+resource "aws_s3_object" "load_logic_script" {
+  bucket = aws_s3_bucket.shipment_pipeline.id
+  key    = "scripts/load_logic.py"
+  source = "../glue_jobs/load_logic.py"
+  etag   = filemd5("../glue_jobs/load_logic.py")
+}
+
 resource "aws_glue_job" "extract" {
   name     = "shipment-pipeline-extract"
   role_arn = aws_iam_role.glue_role.arn
@@ -244,6 +251,7 @@ resource "aws_glue_job" "transform" {
   default_arguments = {
     "--BUCKET_NAME" = aws_s3_bucket.shipment_pipeline.id
     "--job-language" = "python"
+    "--extra-py-files" = "s3://${aws_s3_bucket.shipment_pipeline.id}/${aws_s3_object.transform_logic_script.key}"
   }
 
   glue_version      = "4.0"
@@ -263,6 +271,7 @@ resource "aws_glue_job" "load" {
   default_arguments = {
     "--BUCKET_NAME" = aws_s3_bucket.shipment_pipeline.id
     "--job-language" = "python"
+    "--extra-py-files" = "s3://${aws_s3_bucket.shipment_pipeline.id}/${aws_s3_object.load_logic_script.key}"
   }
 
   glue_version      = "4.0"
@@ -362,6 +371,15 @@ resource "aws_security_group_rule" "rds_self_access" {
   protocol                 = "tcp"
   security_group_id        = aws_security_group.rds_sg.id
   source_security_group_id = aws_security_group.rds_sg.id
+}
+
+resource "aws_security_group_rule" "rds_my_ip_access" {
+  type              = "ingress"
+  from_port         = 5432
+  to_port           = 5432
+  protocol          = "tcp"
+  security_group_id = aws_security_group.rds_sg.id
+  cidr_blocks       = [var.my_ip]
 }
 
 resource "aws_lambda_function" "produce_shipments" {

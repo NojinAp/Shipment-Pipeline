@@ -13,6 +13,7 @@ from pyspark.context import SparkContext
 from awsglue.context import GlueContext
 from awsglue.job import Job
 from pyspark.sql.functions import col, lit, when, coalesce
+from load_logic import calculate_is_breached, calculate_credit_liability
 
 args = getResolvedOptions(sys.argv, ["JOB_NAME", "BUCKET_NAME"])
 
@@ -48,24 +49,9 @@ final_df = (
     .join(actual_delivery_df, on="shipment_id", how="left")
     .join(billing_df, on="shipment_id", how="left")
 )
+final_df = calculate_is_breached(final_df)
+final_df = calculate_credit_liability(final_df)
 
-# is_breached stays null when there is no actual_delivery_date yet. Not delivered yet is not
-# the same as delivered on time, so we don't want to default it to False.
-final_df = final_df.withColumn(
-    "is_breached",
-    when(col("actual_delivery_date").isNull(), None)
-    .when(col("actual_delivery_date") > col("promised_delivery_date"), True)
-    .otherwise(False),
-).withColumn(
-    # coalesce here treats an unknown is_breached as not breached only for this calculation.
-    # is_breached itself is untouched and stays null where it was null.
-    "credit_liability",
-    when(
-        col("is_guaranteed") & coalesce(col("is_breached"), lit(False)),
-        (col("total_billed") * 0.5),
-    ).otherwise(0.00),
-)
-
-final_df.write.mode('overwrite').parquet('s3://{}/load/'.format(args['BUCKET_NAME']))
+final_df.write.mode("overwrite").parquet("s3://{}/load/".format(args["BUCKET_NAME"]))
 
 job.commit()
