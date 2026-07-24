@@ -1,4 +1,9 @@
 terraform {
+  backend "s3" {
+    bucket = "enterprise-shipment-pipeline-024532670007-ca-central-1-an"
+    key    = "terraform/state/shipment-pipeline.tfstate"
+    region = "ca-central-1"
+    }
   required_providers {
     aws = {
       source  = "hashicorp/aws"
