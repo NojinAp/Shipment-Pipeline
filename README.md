@@ -1,116 +1,91 @@
 # Shipment Pipeline
 
-An end to end data engineering pipeline that flags late or missed deliveries and forecasts the resulting billing risk. Built as a personal project to practice the kind of batch and streaming ingestion, ETL orchestration, and data quality work I was exposed to during a data engineering focused co-op.
+An end to end data pipeline that flags SLA/FDA (first delivery attempt) breaches and calculates credit liability for guaranteed shipments that were delivered late. Built as a portfolio project to mirror the real production patterns I learned during a data engineering co-op, using real AWS infrastructure and synthetic data at a realistic scale (1M+ shipment records spanning 2011 to 2026).
 
-## What this project does
+Repo: github.com/NojinAp/Shipment-Pipeline
 
-A shipping company needs to know two things about every package: did it get delivered on time, and if it was guaranteed and it didn't, how much does the company owe the customer as a credit. This pipeline answers both questions.
+## What it does
 
-It pulls shipment, billing, and scan event data from real AWS infrastructure, cleans it, figures out whether each shipment breached its delivery promise, and calculates the credit liability for guaranteed shipments that were late. The end result is a Gold layer table ready for reporting or forecasting.
-
-## A note on the data
-
-All the data in this project is synthetic. I wrote a generator that produces realistic shipment, billing, and scan event records (with things like same day cutoff times, external delay factors, and time varying fuel surcharges) so I could build and test a real pipeline without using any actual company data. The architecture and the AWS services involved mirror patterns I learned about in production, rebuilt independently here with fake data.
-
-## Architecture
-
-![Architecture diagram](assets/architecture.svg)
-
-There are two ways data enters the system, and they represent two different real world patterns:
-
-- Shipment and billing records live in an operational Postgres database (RDS), the same way a booking system would store live transactions. A scheduled job pulls from RDS into Redshift, which acts as the analytics warehouse. Redshift then exports a fresh batch snapshot to S3.
-- Scan events (a package getting scanned at a hub) are simulated as a live event stream through Kinesis and Firehose, since that is a more realistic shape for high volume, one at a time event data than a database table.
-
-Both paths land in the same S3 raw zone. From there, three AWS Glue jobs, orchestrated by Step Functions, run in sequence: Extract standardizes the raw files into Parquet, Transform runs data quality checks and figures out delivery outcomes, and Load merges everything and calculates breach status and credit liability.
+The pipeline ingests shipment bookings, billing records, and package scan events from three separate sources, cleans and joins them, and produces a final table showing whether each guaranteed shipment breached its delivery promise and how much credit liability that breach creates. On top of that, a Gold layer forecasts future credit liability by service tier, comparing a few different modeling approaches.
 
 ## Tech stack
 
-- **AWS Glue (PySpark)** for the Extract, Transform, and Load jobs
-- **AWS Step Functions** to orchestrate the three Glue jobs in order
-- **Amazon Redshift Serverless** as the analytics warehouse
-- **Amazon RDS (Postgres)** as the operational source of shipment and billing records
-- **Amazon Kinesis Data Streams and Firehose** for the scan event stream
-- **AWS Lambda and EventBridge** to simulate new bookings arriving on a schedule
-- **Amazon S3** as the data lake, holding raw, preprocessed, transformed, and final output
-- **Terraform** to provision all of the above as infrastructure as code
-- **Python** (PySpark, psycopg2, redshift_connector, boto3) for the scripts tying everything together
-- **Jupyter notebooks and pandas** for the original exploratory build of the transform and forecasting logic
+AWS Glue (PySpark), Step Functions, Redshift Serverless, RDS (Postgres), Kinesis Data Streams and Firehose, Lambda, EventBridge, CloudWatch, SNS, S3, SageMaker, Terraform, Python (boto3, psycopg2, redshift_connector), pytest.
 
-## Repository structure
+## Architecture
 
-### `glue_jobs/`
-- `extract.py` - reads raw CSV, JSON, and streamed event files, converts everything to typed Parquet, no business logic
-- `transform.py` - runs six data quality checks (orphaned or duplicate billing, events, and shipment records), figures out each shipment's first delivery attempt outcome and actual delivery date
-- `load.py` - merges everything together, decides if a shipment breached its delivery promise, and calculates credit liability for guaranteed late shipments
+Two ingestion paths feed into one S3 raw zone.
 
-### `infra/`
-- `main.tf` - every AWS resource in this project, defined as code: the S3 bucket, IAM roles, Glue jobs, Step Functions state machine, Redshift Serverless workgroup, RDS instance, Kinesis stream, Firehose delivery stream, Lambda function, and EventBridge schedule
-- `.terraform.lock.hcl` - pins the exact provider versions used, so the infrastructure builds the same way every time
+**Batch path:** an hourly EventBridge schedule triggers a Lambda that inserts new shipment bookings into RDS Postgres (the operational source of truth, since it has real enforced primary and foreign keys). A sync script truncates and reloads Redshift from RDS, then unloads that data to S3.
 
-### `notebooks/`
-- `01_bronze_silver_transform.ipynb` - the original exploratory build of the cleaning and transform logic, in pandas, before it was rebuilt as Glue jobs
-- `02_gold_finance_credit_forecast.ipynb` - forecasting quarterly credit liability by service tier
-- `03_gold_ops_fda_report.ipynb` - operational reporting on first delivery attempt success rates
+**Streaming path:** a producer script pushes scan events (package pickup, delivery attempts, etc.) onto a Kinesis stream, which Firehose delivers into S3, hour partitioned. Scan events never touch RDS or Redshift, since that's a more realistic shape for high volume event data than a relational table.
 
-### `redshift/`
-- `redshift_schema.sql` - creates the `shipments` and `billing` tables in Redshift
-- `rds_schema.sql` - creates the same two tables in RDS, this time with real, enforced primary and foreign keys, since Redshift only documents constraints without checking them
-- `sync.sql` - truncates and reloads Redshift's tables from a fresh export of RDS
-- `unload.sql` - exports Redshift's tables back out to S3 as the raw batch snapshot the Glue pipeline reads
+From there, Step Functions orchestrates three sequential Glue jobs.
 
-### Root level Python scripts
-- `run_redshift_schema.py` - applies `redshift_schema.sql` to Redshift
-- `run_rds_schema.py` - applies `rds_schema.sql` to RDS
-- `load_rds_historical_backfill.py` - one time load of historical shipment and billing data into RDS, done through Postgres's native S3 import extension rather than piping data through a local machine
-- `run_batch_sync.py` - pulls current data from RDS and reloads it into Redshift, using `sync.sql`
-- `run_unload.py` - runs `unload.sql`, exporting Redshift's current data to S3
-- `produce_shipments.py` - simulates new bookings by inserting new shipment and billing rows into RDS, run manually or as a one off
-- `lambda_produce_shipments.py` - the same booking simulation logic, adapted to run inside AWS Lambda on an hourly EventBridge schedule
-- `produce_scan_events.py` - simulates scanners by streaming individual scan events into Kinesis
-- `make_samples.py` - generates the small preview files in `sample_data/preview/` from the full synthetic dataset
+- **Extract:** reads the raw CSV/JSON from both paths and writes typed Parquet.
+- **Transform:** runs six data quality checks (orphaned and duplicate billing, orphaned and duplicate scan events, duplicate and bad date shipments), quarantining anything that fails, and derives each shipment's first delivery attempt and actual delivery date from the scan events.
+- **Load:** joins everything into a final shipment level table and calculates `is_breached` and `credit_liability`.
 
-### `scripts/`
-- `generate_synthetic_data.py` - generates the full synthetic dataset (shipments, billing, scan events) with realistic business rules baked in
+## Key design decisions
 
-### `sample_data/`
-- `raw/` - the synthetic source files as originally generated
-- `output/` - quarantine and data quality artifacts produced by the notebook run (orphaned events, duplicate records, timestamp anomalies, and so on)
-- `preview/` - small, truncated versions of the above, kept small enough for GitHub. The full sized data lives in S3, Redshift, and RDS, not in this repository
+**RDS as the real operational source.** Redshift only documents its constraints, it doesn't enforce them, so RDS is where duplicate/orphan prevention actually happens. Historical data was loaded into RDS using Postgres's native `aws_s3` extension rather than a local file import.
 
-### Other files
-- `.gitignore` - excludes Terraform state, environment variables and credentials, and the full sized data files
-- `assets/architecture.svg` - the architecture diagram shown above
+**Backfill and ongoing activity are kept separate.** Bookings have both a one time historical backfill script and a genuinely-running hourly Lambda for ongoing activity. I deliberately didn't fake continuous history, since AWS's own timestamps would contradict it.
 
-## How the pipeline works, end to end
+**Redshift is fully truncated and reloaded on every sync**, not incremental. Simpler, and still a legitimate strategy at this data size.
 
-1. **New activity happens.** Every hour, a Lambda function creates a handful of new shipment and billing records in RDS. Separately, a producer script streams scan events into Kinesis.
-2. **Batch data gets synced to the warehouse.** A sync job pulls the current state of RDS and reloads it into Redshift.
-3. **Redshift exports a snapshot.** Redshift unloads its tables to S3 as CSV, landing in the raw zone. Firehose is doing the same thing for scan events on its own schedule, landing JSON files in the same raw zone.
-4. **Step Functions kicks off the pipeline.** Extract, Transform, and Load run in that order, each one waiting for the last to finish.
-5. **The final output lands in S3**, ready for reporting or forecasting.
+**Testable logic is pulled out of the Glue scripts.** Both `transform.py` and `load.py` import their core business logic (duplicate/orphan detection, breach and liability calculation) from separate modules (`transform_logic.py`, `load_logic.py`) so it can be unit tested with pytest without needing to run an actual Glue job.
 
-## Data quality checks
+## Monitoring and alerting
 
-The Transform job checks for six categories of bad data before anything gets merged:
+Two independent layers feed the same SNS topic, which emails on failure.
 
-- Billing records with no matching shipment
-- Duplicate billing records for the same shipment
-- Scan events with no matching shipment
-- Exact duplicate scan events (the same event ingested twice)
-- Duplicate shipment IDs in the shipment table itself
-- Shipments with a promised delivery date earlier than their booking date
+- **Glue job level:** an EventBridge rule watches for Glue job state change events (FAILED, TIMEOUT, STOPPED) on each individual job and publishes to SNS the moment one happens.
+- **Pipeline level:** a CloudWatch Alarm watches the Step Functions state machine's `ExecutionsFailed` metric, catching failures that might not come from a Glue job specifically (a bad IAM permission on the state machine itself, for example), as a redundant backup to the EventBridge layer.
 
-Every quarantined record gets written to its own folder in S3, tagged with the reason it was flagged, instead of being silently dropped. The pipeline also distinguishes between "this delivery attempt genuinely failed" and "this delivery attempt has bad or missing data" using a separate data quality flag, so the two don't get confused with each other downstream.
+## Testing and CI/CD
 
-## A few design decisions worth knowing about
+`tests/test_transform_logic.py` and `tests/test_load_logic.py` cover the core data quality and business logic functions with pytest, including edge cases like unresolved delivery status staying null instead of defaulting to a value, and non-guaranteed shipments never being charged regardless of breach status.
 
-- **Redshift does not enforce primary or foreign keys.** RDS does. That is one of the real reasons a company would use an operational database as its source of truth rather than the warehouse itself.
-- **The historical data in RDS was loaded once, as a backfill**, separate from the ongoing Lambda producer that simulates new activity happening now. Real systems work the same way: a one time migration when something new is stood up, followed by continuous activity from that point on.
-- **Redshift's tables get fully truncated and reloaded on each sync**, rather than tracking what changed since the last run. For a dataset this size, that is a simpler and still realistic strategy.
-- **Scan events never touch RDS or Redshift at all.** They go straight from Kinesis to S3 through Firehose, since event data at that volume is a better fit for a streaming pipeline than a relational table.
+GitHub Actions runs the full pytest suite on every push and pull request to main. A second job runs `terraform plan` in CI as well, using a remote S3 backend for Terraform state (shared between my local machine and GitHub Actions) so infrastructure changes are visible before they're applied. `terraform apply` itself is still run manually, which is a deliberate choice: auto-applying infrastructure changes on every push is a real risk without more safeguards than a project this size has, and most real teams gate the actual apply behind manual approval even when the plan itself is automated.
 
-## What's next
+## Forecasting
 
-- Forecasting models on the Gold layer output (naive baseline, then classical time series methods)
-- Unit tests for the transform and quality check logic
-- CloudWatch alarms on Glue job failures
+The Gold layer forecasts quarterly credit liability by service tier, comparing four approaches head to head using MAPE (mean absolute percentage error) on a time based holdout:
+
+| Model | MAPE (quarterly) |
+|---|---|
+| Naive baseline (same quarter last year) | 13.06% |
+| Trend-only regression | 7.37% |
+| Trend + seasonality regression | 7.93% |
+| Random Forest | 12.16% |
+
+Trend-only regression won at every grain tested. Random Forest underperformed both regressions since tree based models can't extrapolate a trend past the range they were trained on, and this dataset has a clear ongoing upward trend.
+
+I also trained AWS SageMaker DeepAR, a neural forecasting model that learns patterns across multiple related time series at once, as a fourth candidate. Two versions were tested, one using only the raw series and one adding a categorical feature to distinguish the three service tiers.
+
+| Model | Metric | Value |
+|---|---|---|
+| DeepAR (no categorical feature) | mean weighted quantile loss | 0.0892 |
+| DeepAR (with categorical feature) | mean weighted quantile loss | 0.0948 |
+
+Adding the categorical feature made DeepAR slightly worse rather than better, most likely because there are only three series here with a fairly short history each, not enough examples per category for the extra model capacity to pay off. DeepAR's best result (roughly 8.9% by this metric) didn't beat trend-only regression's 7.37% MAPE either, though the two metrics aren't computed identically so this isn't a perfectly apples to apples comparison. Trend-only regression remains the production recommendation: simpler to deploy, and at least as accurate on this dataset. DeepAR would likely be more competitive with more related series to learn across, or messier data without such a clean trend.
+
+## Known issues and lessons learned
+
+A few real bugs came up while building this, worth documenting since they're genuinely instructive.
+
+**Missing deploy step for a refactored module.** When I split `transform.py`'s duplicate and orphan detection logic into a separate `transform_logic.py` file so it could be pytest tested, I never actually wired it into the Glue job's deployment. Tests passed locally, but the actual Glue job failed in production with `ModuleNotFoundError`, since Glue only sees files explicitly listed in its `--extra-py-files` argument. Passing tests and a correct deploy config are two separate things that can silently diverge. Fixed by adding the missing Terraform resource and argument, and the same care was taken when `load_logic.py` was added later.
+
+**Historical data completeness gap in scan events.** Bookings and billing had a proper one time historical backfill into RDS, but scan events only ever had the ongoing streaming producer, with no equivalent backfill. This meant `is_breached` resolved to null for one hundred percent of the 1M+ historical rows, since no shipment outside the producer's brief live run window had any scan events to derive a delivery outcome from. Fixed with a one time historical scan events file uploaded directly to S3 and a full pipeline re-run.
+
+**SageMaker Python SDK v3.** AWS shipped a major breaking change to the SageMaker SDK partway through this project, restructuring it into several submodules and leaving the top level `sagemaker` package as an empty meta-package. This broke standard DeepAR training code that every existing tutorial uses. Fixed by pinning to the SDK's v2 branch.
+
+**A bug in the SageMaker Estimator class itself.** Even on the correct SDK version, the high level `Estimator` class kept injecting an `Environment` field into the training request that SageMaker's built-in algorithms reject outright, regardless of which Debugger or telemetry settings were disabled. Fixed by dropping to a direct boto3 `create_training_job` call instead of going through the high level SDK wrapper at all.
+
+## Cost and Teardown
+
+This project runs on real, billable AWS infrastructure. See [TEARDOWN.md](./TEARDOWN.md) for what actually costs money, roughly how much, and how to tear it down cleanly.
+
+## In progress
+- Glue Data Catalog, a Crawler, and Athena, to allow SQL querying over the S3 data directly.
